@@ -1,0 +1,569 @@
+import { app, shell, BrowserWindow, ipcMain, nativeTheme, session } from 'electron'
+import { join } from 'path'
+import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import {
+  locateOllama,
+  installOllama,
+  startServer,
+  stopServer,
+  hasModel,
+  pullModel,
+  chatStream,
+  listLocalModels,
+  type OllamaChatMessage
+} from './ollama'
+import {
+  TOOLS,
+  chatSystemPrompt,
+  codeSystemPrompt,
+  findNextAction,
+  emitSafeBoundary,
+  runTool,
+  cleanFileContent,
+  type ToolContext
+} from './tools'
+import {
+  ensureWorkspace,
+  startWorkspaceServer,
+  stopWorkspaceServer,
+  getWorkspaceServerPort,
+  previewUrl,
+  listTree,
+  workspaceDir,
+  wsWriteFile
+} from './workspace'
+import type { ChatRequest, StreamChunk, ToolCall } from '../shared/types'
+
+let mainWindow: BrowserWindow | null = null
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 820,
+    minHeight: 560,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#0e0e0e',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 14 },
+    vibrancy: 'under-window',
+    visualEffectState: 'active',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.mjs'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  mainWindow.on('ready-to-show', () => {
+    mainWindow?.show()
+    if (is.dev) {
+      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+    }
+  })
+
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
+
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
+
+function send(channel: string, payload: unknown): void {
+  mainWindow?.webContents.send(channel, payload)
+}
+
+async function ensureServerRunning(): Promise<string> {
+  let bin = await locateOllama()
+  if (!bin) {
+    send('setup:status', {
+      stage: 'installing-ollama',
+      message: 'Preparing runtime…'
+    })
+    bin = await installOllama((p) => {
+      send('setup:status', {
+        stage: 'installing-ollama',
+        message: p.message,
+        bytesDone: p.bytesDone,
+        bytesTotal: p.bytesTotal,
+        progress:
+          p.bytesDone && p.bytesTotal ? Math.min(1, p.bytesDone / p.bytesTotal) : undefined
+      })
+    })
+  }
+  send('setup:status', { stage: 'starting-ollama', message: 'Starting model runtime…' })
+  await startServer(bin)
+  return bin
+}
+
+async function ensureModel(model: string): Promise<void> {
+  if (await hasModel(model)) return
+  send('setup:status', {
+    stage: 'downloading-model',
+    message: `Downloading ${model}…`,
+    progress: 0
+  })
+  for await (const p of pullModel(model)) {
+    if (p.total && p.completed) {
+      send('setup:status', {
+        stage: 'downloading-model',
+        message: p.status || `Downloading ${model}…`,
+        bytesDone: p.completed,
+        bytesTotal: p.total,
+        progress: p.completed / p.total
+      })
+    } else if (p.status) {
+      send('setup:status', {
+        stage: 'downloading-model',
+        message: `${p.status}…`
+      })
+    }
+  }
+}
+
+async function handleSetup(model: string): Promise<void> {
+  try {
+    send('setup:status', { stage: 'checking', message: 'Checking system…' })
+    await ensureServerRunning()
+    await ensureModel(model)
+    send('setup:status', { stage: 'ready', message: 'Ready to chat.' })
+  } catch (e) {
+    send('setup:status', {
+      stage: 'error',
+      message: 'Setup failed',
+      error: (e as Error).message
+    })
+  }
+}
+
+const MAX_TOOL_ROUNDS_CHAT = 6
+const MAX_TOOL_ROUNDS_CODE = 40
+
+function actionTarget(_name: string, args: Record<string, unknown>): string | undefined {
+  if (typeof args.path === 'string') return args.path
+  if (typeof args.query === 'string') return String(args.query)
+  if (typeof args.url === 'string') return String(args.url)
+  if (typeof args.command === 'string')
+    return String(args.command).slice(0, 80)
+  return undefined
+}
+
+async function handleChat(req: ChatRequest, channel: string): Promise<void> {
+  const abort = new AbortController()
+  chatAbortControllers.set(req.conversationId, abort)
+
+  const emit = (chunk: StreamChunk): void => send(channel, chunk)
+
+  try {
+    const baseMessages: OllamaChatMessage[] = []
+
+    if (req.mode === 'code') {
+      const wsPath = await ensureWorkspace(req.conversationId)
+      const href = previewUrl(req.conversationId)
+      baseMessages.push({ role: 'system', content: codeSystemPrompt(wsPath, href) })
+    } else {
+      baseMessages.push({ role: 'system', content: chatSystemPrompt(req.enableTools) })
+    }
+
+    for (const m of req.messages) {
+      baseMessages.push({ role: m.role as OllamaChatMessage['role'], content: m.content })
+      if (m.toolCalls) {
+        for (const tc of m.toolCalls) {
+          if (tc.result != null) {
+            baseMessages.push({
+              role: 'tool',
+              content: `Result of <action name="${tc.name}">: ${tc.result}`
+            })
+          }
+        }
+      }
+    }
+
+    const ctx: ToolContext = {
+      conversationId: req.conversationId,
+      onFileChange: () => send('workspace:changed', { conversationId: req.conversationId })
+    }
+
+    const useTools = req.mode === 'code' || req.enableTools
+    const maxRounds = req.mode === 'code' ? MAX_TOOL_ROUNDS_CODE : MAX_TOOL_ROUNDS_CHAT
+
+    emit({ type: 'activity', activity: { kind: 'thinking', chars: 0 } })
+
+    for (let round = 0; round < maxRounds; round++) {
+      let buffer = ''
+      let emittedIdx = 0
+      let firstToken = true
+      let executedAction = false
+      let lastActivityTs = 0
+      let pendingAction: { name: string; target?: string } | null = null
+
+      // Live-write state for write_file streaming
+      let livePath: string | null = null
+      let liveContentStart = -1
+      let lastLiveWrite = 0
+      let livePending: Promise<unknown> | null = null
+      let lastEmittedContent = ''
+      const writeLivePartial = (): void => {
+        if (!livePath || liveContentStart < 0 || livePending) return
+        let partial = buffer.slice(liveContentStart)
+        if (partial.startsWith('\n')) partial = partial.slice(1)
+        const closeIdx = partial.indexOf('</content>')
+        if (closeIdx >= 0) partial = partial.slice(0, closeIdx)
+        const cleaned = cleanFileContent(partial, livePath)
+        if (cleaned !== lastEmittedContent) {
+          lastEmittedContent = cleaned
+          send('file:streaming', {
+            conversationId: req.conversationId,
+            path: livePath,
+            content: cleaned,
+            done: false
+          })
+        }
+        livePending = wsWriteFile(req.conversationId, livePath, cleaned)
+          .then(() => {
+            send('workspace:changed', { conversationId: req.conversationId })
+          })
+          .catch(() => {
+            /* tolerate partial write failures */
+          })
+          .finally(() => {
+            livePending = null
+          })
+      }
+
+      const emitActivity = (): void => {
+        const now = Date.now()
+        if (now - lastActivityTs < 400) return
+        lastActivityTs = now
+        if (pendingAction) {
+          emit({
+            type: 'activity',
+            activity: {
+              kind: 'tool',
+              tool: pendingAction.name,
+              target: pendingAction.target,
+              chars: buffer.length
+            }
+          })
+        } else {
+          emit({ type: 'activity', activity: { kind: 'generating', chars: buffer.length } })
+        }
+      }
+
+      streamLoop: for await (const chunk of chatStream({
+        model: req.model,
+        messages: baseMessages,
+        signal: abort.signal
+      })) {
+        if (chunk.content) {
+          if (firstToken) {
+            firstToken = false
+            emit({ type: 'activity', activity: { kind: 'generating', chars: 0 } })
+          }
+          buffer += chunk.content
+
+          // Forward raw token to devtools console for debugging
+          mainWindow?.webContents.send('chat:raw', {
+            conversationId: req.conversationId,
+            chunk: chunk.content
+          })
+
+          // Detect if we've started an action (for activity label + live writes)
+          if (!pendingAction) {
+            const openMatch = buffer
+              .slice(emittedIdx)
+              .match(/<action\s+name\s*=\s*["']?([a-zA-Z_][\w]*)["']?\s*>/i)
+            if (openMatch) {
+              const name = openMatch[1]
+              const rest = buffer.slice(emittedIdx + (openMatch.index ?? 0))
+              const pathM = rest.match(/<path>([^<]+?)<\/path>/i)
+              const urlM = rest.match(/<url>([^<]+?)<\/url>/i)
+              const qM = rest.match(/<query>([^<]+?)<\/query>/i)
+              const cmdM = rest.match(/<command>([^<\n]+)/i)
+              pendingAction = {
+                name,
+                target: pathM?.[1] || urlM?.[1] || qM?.[1] || cmdM?.[1]
+              }
+            }
+          } else if (!pendingAction.target) {
+            const rest = buffer.slice(emittedIdx)
+            const pathM = rest.match(/<path>([^<]+?)<\/path>/i)
+            const urlM = rest.match(/<url>([^<]+?)<\/url>/i)
+            const qM = rest.match(/<query>([^<]+?)<\/query>/i)
+            const cmdM = rest.match(/<command>([^<\n]+)/i)
+            const t = pathM?.[1] || urlM?.[1] || qM?.[1] || cmdM?.[1]
+            if (t) pendingAction.target = t
+          }
+
+          // Live write_file streaming — create/update the file as <content> grows
+          if (pendingAction?.name === 'write_file' && pendingAction.target && !livePath) {
+            livePath = pendingAction.target
+          }
+          if (livePath && liveContentStart < 0) {
+            const idx = buffer.indexOf('<content>')
+            if (idx >= 0) liveContentStart = idx + '<content>'.length
+          }
+          if (livePath && liveContentStart >= 0) {
+            const now = Date.now()
+            if (now - lastLiveWrite > 450) {
+              lastLiveWrite = now
+              writeLivePartial()
+            }
+          }
+
+          emitActivity()
+
+          while (true) {
+            if (!useTools) {
+              // No tool parsing: stream tokens as they arrive
+              if (emittedIdx < buffer.length) {
+                emit({ type: 'token', text: buffer.slice(emittedIdx) })
+                emittedIdx = buffer.length
+              }
+              break
+            }
+
+            const found = findNextAction(buffer, emittedIdx)
+
+            if (found === null) {
+              // No action starting in the remaining buffer: emit safe text
+              const safe = emitSafeBoundary(buffer, emittedIdx)
+              if (safe > emittedIdx) {
+                emit({ type: 'token', text: buffer.slice(emittedIdx, safe) })
+                emittedIdx = safe
+              }
+              break
+            }
+
+            if (found === 'incomplete') {
+              // Action has started but not closed. Emit text up to the open tag.
+              const openIdx = buffer.indexOf('<action', emittedIdx)
+              if (openIdx > emittedIdx) {
+                emit({ type: 'token', text: buffer.slice(emittedIdx, openIdx) })
+                emittedIdx = openIdx
+              }
+              break
+            }
+
+            // Emit any text between last emit and action start
+            if (found.start > emittedIdx) {
+              emit({ type: 'token', text: buffer.slice(emittedIdx, found.start) })
+            }
+            emittedIdx = found.end
+
+            const call: ToolCall = {
+              id: `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              name: found.name,
+              args: found.args,
+              running: true
+            }
+            emit({ type: 'tool_call', call })
+            emit({
+              type: 'activity',
+              activity: { kind: 'tool', tool: found.name, target: actionTarget(found.name, found.args) }
+            })
+
+            let result: string
+            let hadError = false
+            try {
+              result = await runTool(found.name, found.args, ctx)
+              emit({ type: 'tool_result', id: call.id, result })
+            } catch (e) {
+              result = `Error: ${(e as Error).message}`
+              hadError = true
+              emit({ type: 'tool_result', id: call.id, error: result })
+            }
+
+            baseMessages.push({ role: 'assistant', content: buffer.slice(0, emittedIdx) })
+            baseMessages.push({
+              role: 'tool',
+              content: `[${hadError ? 'error' : 'ok'}] ${found.name}: ${result}`
+            })
+            executedAction = true
+            if (livePath) {
+              send('file:streaming', {
+                conversationId: req.conversationId,
+                path: livePath,
+                content: lastEmittedContent,
+                done: true
+              })
+            }
+            pendingAction = null
+            livePath = null
+            liveContentStart = -1
+            lastEmittedContent = ''
+            emit({ type: 'activity', activity: { kind: 'thinking', chars: 0 } })
+            // Break out of the current Ollama stream — we need to start a new
+            // request with the updated conversation including the tool result.
+            break streamLoop
+          }
+        }
+        if (chunk.done) {
+          break streamLoop
+        }
+      }
+
+      if (!executedAction) {
+        emit({ type: 'activity', activity: { kind: 'idle' } })
+        emit({ type: 'done' })
+        return
+      }
+    }
+    emit({ type: 'activity', activity: { kind: 'idle' } })
+    emit({
+      type: 'error',
+      error: `Reached max tool rounds (${maxRounds}). Ask the model to finish up and try again.`
+    })
+  } catch (e) {
+    emit({ type: 'activity', activity: { kind: 'idle' } })
+    if ((e as Error).name === 'AbortError') {
+      emit({ type: 'done' })
+    } else {
+      emit({ type: 'error', error: (e as Error).message })
+    }
+  } finally {
+    chatAbortControllers.delete(req.conversationId)
+  }
+}
+
+const chatAbortControllers = new Map<string, AbortController>()
+
+app.whenReady().then(async () => {
+  electronApp.setAppUserModelId('com.ammaar.gemmachat')
+  nativeTheme.themeSource = 'dark'
+
+  app.on('browser-window-created', (_, window) => {
+    optimizer.watchWindowShortcuts(window)
+  })
+
+  await startWorkspaceServer()
+
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    if (permission === 'media' || permission === 'mediaKeySystem') {
+      callback(true)
+      return
+    }
+    callback(false)
+  })
+  session.defaultSession.setPermissionCheckHandler(() => true)
+
+  ipcMain.handle('setup:start', async (_e, model: string) => {
+    await handleSetup(model)
+  })
+
+  ipcMain.handle('setup:status', async () => {
+    const bin = await locateOllama()
+    return { hasOllama: !!bin }
+  })
+
+  ipcMain.handle('models:list-local', async () => {
+    return listLocalModels()
+  })
+
+  ipcMain.handle('chat:send', async (_e, req: ChatRequest) => {
+    const channel = `chat:stream:${req.conversationId}`
+    handleChat(req, channel).catch((err) => console.error('chat handler error', err))
+    return { channel }
+  })
+
+  ipcMain.handle('chat:abort', async (_e, conversationId: string) => {
+    const c = chatAbortControllers.get(conversationId)
+    if (c) c.abort()
+  })
+
+  ipcMain.handle('tools:list', async () => {
+    return Object.values(TOOLS).map((t) => ({
+      name: t.name,
+      description: t.description,
+      mode: t.mode
+    }))
+  })
+
+  ipcMain.handle('workspace:info', async (_e, conversationId: string) => {
+    await ensureWorkspace(conversationId)
+    return {
+      conversationId,
+      path: workspaceDir(conversationId),
+      previewUrl: previewUrl(conversationId)
+    }
+  })
+
+  ipcMain.handle('workspace:list', async (_e, conversationId: string) => {
+    const base = await ensureWorkspace(conversationId)
+    return listTree(base, 300)
+  })
+
+  ipcMain.handle('workspace:open-external', async (_e, conversationId: string) => {
+    await ensureWorkspace(conversationId)
+    shell.openPath(workspaceDir(conversationId))
+  })
+
+  ipcMain.handle('workspace:server-port', async () => getWorkspaceServerPort())
+
+  ipcMain.handle(
+    'audio:transcribe',
+    async (_e, { base64, model }: { base64: string; model: string }) => {
+      // Ollama multimodal chat: try `audios` field, fall back to `images`
+      async function tryField(field: 'audios' | 'images'): Promise<string | null> {
+        try {
+          const res = await fetch('http://127.0.0.1:11434/api/chat', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              model,
+              stream: false,
+              messages: [
+                {
+                  role: 'user',
+                  content:
+                    'Transcribe this audio verbatim. Reply with ONLY the transcribed text, no preamble or quotation marks.',
+                  [field]: [base64]
+                }
+              ]
+            })
+          })
+          if (!res.ok) return null
+          const data = (await res.json()) as { message?: { content?: string } }
+          const text = data.message?.content?.trim() ?? ''
+          if (!text) return null
+          // Heuristic: if model replied with something like "I can't process audio", treat as failure
+          if (/can(not|'t)\s+(process|hear|transcribe|handle)|no audio|not (a|an) audio/i.test(text)) {
+            return null
+          }
+          return text
+        } catch {
+          return null
+        }
+      }
+      const text = (await tryField('audios')) ?? (await tryField('images'))
+      return { text: text ?? '' }
+    }
+  )
+
+  createWindow()
+
+  app.on('activate', function () {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  // On macOS, keep the app alive in the dock so reopening is instant and the
+  // Ollama subprocess + workspace server stay warm. Only non-darwin platforms
+  // quit on last-window-close.
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+app.on('before-quit', () => {
+  stopServer()
+  stopWorkspaceServer()
+})
