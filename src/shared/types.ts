@@ -94,15 +94,15 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     label: 'Gemma 4 E2B',
     size: '1.5 GB',
     sizeBytes: 1_500_000_000,
-    description: 'Edge-sized. Fast & lightweight. Text + image + audio. Runs on 8GB+ Macs.'
+    description: 'Edge-sized. Fast & lightweight. Text + image + audio. Runs on 8GB+ Macs.',
+    recommended: true
   },
   {
     name: 'mlx-community/gemma-4-e4b-it-4bit',
     label: 'Gemma 4 E4B',
     size: '3 GB',
     sizeBytes: 3_000_000_000,
-    description: 'Best all-rounder. Text + image + audio. Runs on 8GB+ Macs.',
-    recommended: true
+    description: 'Best all-rounder. Text + image + audio. Runs on 8GB+ Macs. (requires mlx-lm update)'
   },
   {
     name: 'mlx-community/gemma-4-26b-a4b-it-4bit',
@@ -120,5 +120,5 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
   }
 ]
 
-export const DEFAULT_MODEL = 'mlx-community/gemma-4-e4b-it-4bit'
+export const DEFAULT_MODEL = 'mlx-community/gemma-4-e2b-it-4bit'
 
