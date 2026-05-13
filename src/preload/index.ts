@@ -12,7 +12,7 @@ const api = {
 
   switchModel: (model: string): Promise<void> => ipcRenderer.invoke('model:switch', model),
 
-  checkMLX: (): Promise<{ hasMLX: boolean }> => ipcRenderer.invoke('setup:status'),
+  checkMLX: (): Promise<{ hasMLX: boolean; cachedModels?: string[] }> => ipcRenderer.invoke('setup:status'),
 
   onSetupStatus: (cb: (s: SetupStatus) => void): (() => void) => {
     const listener = (_: IpcRendererEvent, s: SetupStatus): void => cb(s)

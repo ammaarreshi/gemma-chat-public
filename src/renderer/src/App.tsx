@@ -44,21 +44,16 @@ export default function App() {
         })
       })
 
-      const local = await window.api.listLocalModels()
-      const hasDefault = local.some(
-        (m) => m === DEFAULT_MODEL || m.startsWith(DEFAULT_MODEL + ':')
-      )
-      if (hasDefault) {
-        const { hasMLX } = await window.api.checkMLX()
-        if (hasMLX) {
-          setState({
-            phase: 'setup',
-            status: { stage: 'starting-mlx', message: 'Starting model runtime…' },
-            model: DEFAULT_MODEL
-          })
-          window.api.startSetup(DEFAULT_MODEL)
-          return
-        }
+      const { hasMLX, cachedModels } = await window.api.checkMLX()
+      const modelToUse = cachedModels?.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : (cachedModels?.[0] ?? DEFAULT_MODEL)
+      if (hasMLX && cachedModels && cachedModels.length > 0) {
+        setState({
+          phase: 'setup',
+          status: { stage: 'starting-mlx', message: 'Starting model runtime…' },
+          model: modelToUse
+        })
+        window.api.startSetup(modelToUse)
+        return
       }
       setState({
         phase: 'setup',

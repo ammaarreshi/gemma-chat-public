@@ -3,7 +3,7 @@ import { spawn, ChildProcess, spawnSync } from 'child_process'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 
-const MLX_PORT = 11434
+const MLX_PORT = 11435
 const MLX_HOST = `127.0.0.1:${MLX_PORT}`
 const MLX_URL = `http://${MLX_HOST}`
 
@@ -137,6 +137,7 @@ export function locateMLX(): MLXStatus | null {
           const stdout = check.stdout?.toString().trim() || ''
           if (check.status === 0 && stdout.includes('ok')) {
             console.log('[mlx] Found mlx-lm in venv')
+            patchSnapshotDownload(vPy)
             return { python: vPy, installed: true }
           }
         } catch {
@@ -216,8 +217,47 @@ export async function installMLX(
     throw new Error(`mlx-lm installed but failed to import: ${err}`)
   }
 
+  // Patch huggingface_hub to use sequential downloads (Python 3.13 ThreadPoolExecutor compat)
+  patchSnapshotDownload(vPy)
+
   console.log('[mlx] mlx-lm installed successfully')
   return vPy
+}
+
+/**
+ * Patch huggingface_hub's _snapshot_download.py to use a sequential loop
+ * instead of thread_map. This avoids the Python 3.13 ThreadPoolExecutor
+ * shutdown crash that occurs when snapshot_download is called from a
+ * background thread (e.g. mlx_lm lazy model loading).
+ */
+function patchSnapshotDownload(python: string): void {
+  const patchScript = `
+import sys, re
+from pathlib import Path
+import huggingface_hub._snapshot_download as m
+path = Path(m.__file__)
+src = path.read_text()
+old = '''    thread_map(
+        _inner_hf_hub_download,
+        filtered_repo_files,
+        desc=tqdm_desc,
+        max_workers=max_workers,
+        tqdm_class=tqdm_class,
+    )'''
+new = '''    # Sequential — avoids Python 3.13 ThreadPoolExecutor shutdown crash
+    for item in tqdm_class(filtered_repo_files, desc=tqdm_desc):
+        _inner_hf_hub_download(item)'''
+if old in src:
+    path.write_text(src.replace(old, new))
+    print('patched')
+else:
+    print('already patched or pattern not found')
+`
+  const result = spawnSync(python, ['-c', patchScript], {
+    timeout: 15000,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  console.log('[mlx] snapshot_download patch:', result.stdout?.toString().trim() || result.stderr?.toString().trim())
 }
 
 /** Run a subprocess and stream output to onProgress */
@@ -257,6 +297,42 @@ function runProcess(
 }
 
 // ---------------------------------------------------------------------------
+// Model downloading
+// ---------------------------------------------------------------------------
+
+async function ensureModelDownloaded(
+  python: string,
+  model: string,
+  onProgress?: (p: ServerProgress) => void
+): Promise<void> {
+  const downloadScript = app.isPackaged
+    ? join(process.resourcesPath, 'download_model.py')
+    : join(app.getAppPath(), 'resources', 'download_model.py')
+  if (!existsSync(downloadScript)) {
+    console.log('[mlx] Download script not found, skipping pre-download')
+    return
+  }
+
+  // Check local HuggingFace cache directly — avoids hitting the server or network
+  const cacheSlug = 'models--' + model.replace('/', '--')
+  const snapshotsDir = join(modelsDir(), 'hub', cacheSlug, 'snapshots')
+  if (existsSync(snapshotsDir)) {
+    console.log(`[mlx] Model ${model} already in cache, skipping download`)
+    return
+  }
+
+  if (onProgress) {
+    onProgress({ message: 'Downloading model (this may take a few minutes)…' })
+  }
+
+  await runProcess(python, [downloadScript, model, modelsDir()], (p) => {
+    if (onProgress) {
+      onProgress({ message: p.message })
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
@@ -276,6 +352,9 @@ export async function startServer(
   // Kill existing server if running with different model
   stopServer()
 
+  // Pre-download model with single-threaded approach
+  await ensureModelDownloaded(python, model, onProgress)
+
   const env = {
     ...process.env,
     // HuggingFace cache dir — keep models in our app data
@@ -288,11 +367,11 @@ export async function startServer(
   let earlyExit: { code: number | null; stderr: string } | null = null
   let stderrBuf = ''
 
-  console.log(`[mlx] Starting server: ${python} -m mlx_lm.server --model ${model} --port ${MLX_PORT}`)
+  console.log(`[mlx] Starting server: ${python} -m mlx_lm server --model ${model} --port ${MLX_PORT}`)
 
   serverProc = spawn(
     python,
-    ['-m', 'mlx_lm.server', '--model', model, '--port', String(MLX_PORT)],
+    ['-m', 'mlx_lm', 'server', '--model', model, '--port', String(MLX_PORT)],
     {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -351,6 +430,10 @@ export function stopServer(): void {
     serverProc = null
     currentModel = null
   }
+  // Kill any orphaned process still holding the port (e.g. from a previous crash)
+  try {
+    spawnSync('bash', ['-c', `lsof -ti :${MLX_PORT} | xargs kill -9 2>/dev/null; sleep 0.5`], { stdio: 'ignore' })
+  } catch { /* ok if nothing on the port */ }
 }
 
 /**

@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, session, nativeImage } from 'electron'
 import { join } from 'path'
+import { existsSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { AVAILABLE_MODELS } from '@shared/types'
 import {
@@ -169,15 +170,24 @@ async function handleChat(req: ChatRequest, channel: string): Promise<void> {
     }
 
     for (const m of req.messages) {
-      baseMessages.push({ role: m.role as MLXChatMessage['role'], content: m.content })
-      if (m.toolCalls) {
-        for (const tc of m.toolCalls) {
-          if (tc.result != null) {
-            baseMessages.push({
-              role: 'tool',
-              content: `Result of <action name="${tc.name}">: ${tc.result}`
-            })
-          }
+      const role = m.role === 'tool' ? 'user' : (m.role as MLXChatMessage['role'])
+      const toolResults = m.toolCalls
+        ?.filter((tc) => tc.result != null)
+        .map((tc) => `Result of <action name="${tc.name}">: ${tc.result}`) ?? []
+
+      const last = baseMessages[baseMessages.length - 1]
+      if (last && last.role === role) {
+        last.content += '\n\n' + m.content
+      } else {
+        baseMessages.push({ role, content: m.content })
+      }
+
+      if (toolResults.length > 0) {
+        const lastAfter = baseMessages[baseMessages.length - 1]
+        if (lastAfter && lastAfter.role === 'user') {
+          lastAfter.content += '\n\n' + toolResults.join('\n\n')
+        } else {
+          baseMessages.push({ role: 'user', content: toolResults.join('\n\n') })
         }
       }
     }
@@ -504,9 +514,17 @@ app.whenReady().then(async () => {
     }
   })
 
-  ipcMain.handle('setup:status', async () => {
+  ipcMain.handle('setup:status', () => {
     const mlx = locateMLX()
-    return { hasMLX: !!(mlx && mlx.installed) }
+    if (!mlx || !mlx.installed) return { hasMLX: false, cachedModels: [] }
+    const hubDir = join(app.getPath('userData'), 'mlx', 'models', 'hub')
+    const cachedModels = AVAILABLE_MODELS
+      .map((m) => m.name)
+      .filter((name) => {
+        const slug = 'models--' + name.replace('/', '--')
+        return existsSync(join(hubDir, slug, 'snapshots'))
+      })
+    return { hasMLX: true, cachedModels }
   })
 
   ipcMain.handle('models:list-local', async () => {
