@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, session, nativeImage } from 'electron'
-import { join, existsSync } from 'path'
+import { join } from 'path'
+import { existsSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { AVAILABLE_MODELS } from '@shared/types'
 import {
