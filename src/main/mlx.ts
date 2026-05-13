@@ -313,9 +313,11 @@ async function ensureModelDownloaded(
     return
   }
 
-  const models = await listLocalModels().catch(() => [])
-  if (models.includes(model)) {
-    console.log(`[mlx] Model ${model} already downloaded`)
+  // Check local HuggingFace cache directly — avoids hitting the server or network
+  const cacheSlug = 'models--' + model.replace('/', '--')
+  const snapshotsDir = join(modelsDir(), 'hub', cacheSlug, 'snapshots')
+  if (existsSync(snapshotsDir)) {
+    console.log(`[mlx] Model ${model} already in cache, skipping download`)
     return
   }
 

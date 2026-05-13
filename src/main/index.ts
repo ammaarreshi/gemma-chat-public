@@ -506,7 +506,18 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('setup:status', async () => {
     const mlx = locateMLX()
-    return { hasMLX: !!(mlx && mlx.installed) }
+    if (!mlx || !mlx.installed) return { hasMLX: false, cachedModels: [] }
+    // Check local HF cache without needing a running server
+    const { join, existsSync } = await import('path')
+    const { app: electronApp } = await import('electron')
+    const hubDir = join(electronApp.getPath('userData'), 'mlx', 'models', 'hub')
+    const cachedModels = AVAILABLE_MODELS
+      .map((m) => m.name)
+      .filter((name) => {
+        const slug = 'models--' + name.replace('/', '--')
+        return existsSync(join(hubDir, slug, 'snapshots'))
+      })
+    return { hasMLX: true, cachedModels }
   })
 
   ipcMain.handle('models:list-local', async () => {
