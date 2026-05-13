@@ -3,7 +3,7 @@ import { spawn, ChildProcess, spawnSync } from 'child_process'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 
-const MLX_PORT = 11434
+const MLX_PORT = 11435
 const MLX_HOST = `127.0.0.1:${MLX_PORT}`
 const MLX_URL = `http://${MLX_HOST}`
 
@@ -432,7 +432,7 @@ export function stopServer(): void {
   }
   // Kill any orphaned process still holding the port (e.g. from a previous crash)
   try {
-    spawnSync('bash', ['-c', `lsof -ti :${MLX_PORT} | xargs kill -9`], { stdio: 'ignore' })
+    spawnSync('bash', ['-c', `lsof -ti :${MLX_PORT} | xargs kill -9 2>/dev/null; sleep 0.5`], { stdio: 'ignore' })
   } catch { /* ok if nothing on the port */ }
 }
 
