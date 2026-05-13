@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, session, nativeImage } from 'electron'
-import { join } from 'path'
+import { join, existsSync } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { AVAILABLE_MODELS } from '@shared/types'
 import {
@@ -504,13 +504,10 @@ app.whenReady().then(async () => {
     }
   })
 
-  ipcMain.handle('setup:status', async () => {
+  ipcMain.handle('setup:status', () => {
     const mlx = locateMLX()
     if (!mlx || !mlx.installed) return { hasMLX: false, cachedModels: [] }
-    // Check local HF cache without needing a running server
-    const { join, existsSync } = await import('path')
-    const { app: electronApp } = await import('electron')
-    const hubDir = join(electronApp.getPath('userData'), 'mlx', 'models', 'hub')
+    const hubDir = join(app.getPath('userData'), 'mlx', 'models', 'hub')
     const cachedModels = AVAILABLE_MODELS
       .map((m) => m.name)
       .filter((name) => {
