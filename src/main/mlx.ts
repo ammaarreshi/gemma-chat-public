@@ -257,6 +257,40 @@ function runProcess(
 }
 
 // ---------------------------------------------------------------------------
+// Model downloading
+// ---------------------------------------------------------------------------
+
+async function ensureModelDownloaded(
+  python: string,
+  model: string,
+  onProgress?: (p: ServerProgress) => void
+): Promise<void> {
+  const downloadScript = app.isPackaged
+    ? join(process.resourcesPath, 'download_model.py')
+    : join(app.getAppPath(), 'resources', 'download_model.py')
+  if (!existsSync(downloadScript)) {
+    console.log('[mlx] Download script not found, skipping pre-download')
+    return
+  }
+
+  const models = await listLocalModels().catch(() => [])
+  if (models.includes(model)) {
+    console.log(`[mlx] Model ${model} already downloaded`)
+    return
+  }
+
+  if (onProgress) {
+    onProgress({ message: 'Downloading model (this may take a few minutes)…' })
+  }
+
+  await runProcess(python, [downloadScript, model, modelsDir()], (p) => {
+    if (onProgress) {
+      onProgress({ message: p.message })
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
@@ -276,6 +310,9 @@ export async function startServer(
   // Kill existing server if running with different model
   stopServer()
 
+  // Pre-download model with single-threaded approach
+  await ensureModelDownloaded(python, model, onProgress)
+
   const env = {
     ...process.env,
     // HuggingFace cache dir — keep models in our app data
@@ -288,11 +325,11 @@ export async function startServer(
   let earlyExit: { code: number | null; stderr: string } | null = null
   let stderrBuf = ''
 
-  console.log(`[mlx] Starting server: ${python} -m mlx_lm.server --model ${model} --port ${MLX_PORT}`)
+  console.log(`[mlx] Starting server: ${python} -m mlx_lm server --model ${model} --port ${MLX_PORT}`)
 
   serverProc = spawn(
     python,
-    ['-m', 'mlx_lm.server', '--model', model, '--port', String(MLX_PORT)],
+    ['-m', 'mlx_lm', 'server', '--model', model, '--port', String(MLX_PORT)],
     {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
