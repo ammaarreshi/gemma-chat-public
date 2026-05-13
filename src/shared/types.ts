@@ -90,35 +90,35 @@ export interface ModelInfo {
 
 export const AVAILABLE_MODELS: ModelInfo[] = [
   {
-    name: 'mlx-community/gemma-4-e2b-it-4bit',
-    label: 'Gemma 4 E2B',
-    size: '1.5 GB',
-    sizeBytes: 1_500_000_000,
-    description: 'Edge-sized. Fast & lightweight. Text + image + audio. Runs on 8GB+ Macs.',
+    name: 'mlx-community/gemma-3-1b-it-4bit',
+    label: 'Gemma 3 1B',
+    size: '0.7 GB',
+    sizeBytes: 700_000_000,
+    description: 'Smallest. Instant responses. Great for quick tasks. Runs on any Mac.'
+  },
+  {
+    name: 'mlx-community/gemma-3-4b-it-4bit',
+    label: 'Gemma 3 4B',
+    size: '2.5 GB',
+    sizeBytes: 2_500_000_000,
+    description: 'Best all-rounder. Fast and capable. Runs on 8GB+ Macs.',
     recommended: true
   },
   {
-    name: 'mlx-community/gemma-4-e4b-it-4bit',
-    label: 'Gemma 4 E4B',
-    size: '3 GB',
-    sizeBytes: 3_000_000_000,
-    description: 'Best all-rounder. Text + image + audio. Runs on 8GB+ Macs. (requires mlx-lm update)'
+    name: 'mlx-community/gemma-3-12b-it-4bit',
+    label: 'Gemma 3 12B',
+    size: '7 GB',
+    sizeBytes: 7_000_000_000,
+    description: 'High quality. 16GB+ RAM recommended.'
   },
   {
-    name: 'mlx-community/gemma-4-26b-a4b-it-4bit',
-    label: 'Gemma 4 27B MoE',
+    name: 'mlx-community/gemma-3-27b-it-4bit',
+    label: 'Gemma 3 27B',
     size: '16 GB',
     sizeBytes: 16_000_000_000,
-    description: 'Mixture-of-Experts (26B, 4B active). 16GB+ RAM recommended.'
-  },
-  {
-    name: 'mlx-community/gemma-4-31b-it-4bit',
-    label: 'Gemma 4 31B',
-    size: '18 GB',
-    sizeBytes: 18_000_000_000,
-    description: 'Frontier dense model. Best quality. 32GB+ RAM recommended.'
+    description: 'Best quality. 32GB+ RAM recommended.'
   }
 ]
 
-export const DEFAULT_MODEL = 'mlx-community/gemma-4-e2b-it-4bit'
+export const DEFAULT_MODEL = 'mlx-community/gemma-3-4b-it-4bit'
 
