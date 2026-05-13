@@ -137,6 +137,7 @@ export function locateMLX(): MLXStatus | null {
           const stdout = check.stdout?.toString().trim() || ''
           if (check.status === 0 && stdout.includes('ok')) {
             console.log('[mlx] Found mlx-lm in venv')
+            patchSnapshotDownload(vPy)
             return { python: vPy, installed: true }
           }
         } catch {
@@ -216,8 +217,47 @@ export async function installMLX(
     throw new Error(`mlx-lm installed but failed to import: ${err}`)
   }
 
+  // Patch huggingface_hub to use sequential downloads (Python 3.13 ThreadPoolExecutor compat)
+  patchSnapshotDownload(vPy)
+
   console.log('[mlx] mlx-lm installed successfully')
   return vPy
+}
+
+/**
+ * Patch huggingface_hub's _snapshot_download.py to use a sequential loop
+ * instead of thread_map. This avoids the Python 3.13 ThreadPoolExecutor
+ * shutdown crash that occurs when snapshot_download is called from a
+ * background thread (e.g. mlx_lm lazy model loading).
+ */
+function patchSnapshotDownload(python: string): void {
+  const patchScript = `
+import sys, re
+from pathlib import Path
+import huggingface_hub._snapshot_download as m
+path = Path(m.__file__)
+src = path.read_text()
+old = '''    thread_map(
+        _inner_hf_hub_download,
+        filtered_repo_files,
+        desc=tqdm_desc,
+        max_workers=max_workers,
+        tqdm_class=tqdm_class,
+    )'''
+new = '''    # Sequential — avoids Python 3.13 ThreadPoolExecutor shutdown crash
+    for item in tqdm_class(filtered_repo_files, desc=tqdm_desc):
+        _inner_hf_hub_download(item)'''
+if old in src:
+    path.write_text(src.replace(old, new))
+    print('patched')
+else:
+    print('already patched or pattern not found')
+`
+  const result = spawnSync(python, ['-c', patchScript], {
+    timeout: 15000,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  console.log('[mlx] snapshot_download patch:', result.stdout?.toString().trim() || result.stderr?.toString().trim())
 }
 
 /** Run a subprocess and stream output to onProgress */
@@ -388,6 +428,10 @@ export function stopServer(): void {
     serverProc = null
     currentModel = null
   }
+  // Kill any orphaned process still holding the port (e.g. from a previous crash)
+  try {
+    spawnSync('bash', ['-c', `lsof -ti :${MLX_PORT} | xargs kill -9`], { stdio: 'ignore' })
+  } catch { /* ok if nothing on the port */ }
 }
 
 /**
