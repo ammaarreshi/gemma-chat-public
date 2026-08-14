@@ -52,6 +52,18 @@ export default function Message({
     return (
       <div className="flex justify-end">
         <div className="selectable max-w-[78%] rounded-2xl rounded-br-md bg-white/[0.08] px-4 py-2.5 text-[14.5px] leading-relaxed text-white">
+          {!!message.attachments?.length && (
+            <div className={`flex flex-wrap gap-2 ${message.content ? 'mb-2' : ''}`}>
+              {message.attachments.map((attachment, index) => (
+                <span
+                  key={`${attachment.name}-${index}`}
+                  className="max-w-[260px] truncate rounded-md border border-white/10 bg-black/10 px-2 py-1 text-xs text-ink-200"
+                >
+                  📄 {attachment.name}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="whitespace-pre-wrap">{message.content}</div>
         </div>
       </div>

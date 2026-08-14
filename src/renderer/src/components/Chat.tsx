@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AVAILABLE_MODELS, type AgentMode, type ChatMessage, type ToolCall, type StreamChunk } from '@shared/types'
+import { AVAILABLE_MODELS, type AgentMode, type ChatAttachment, type ChatMessage, type ToolCall, type StreamChunk } from '@shared/types'
 import gemmaLogoUrl from '../assets/gemma-logo.png'
 import Composer from './Composer'
 import Message from './Message'
@@ -108,8 +108,8 @@ export default function Chat({ model, onSwitchModel }: Props) {
     updateActive((c) => ({ ...c, canvasOpen: !c.canvasOpen }))
   }
 
-  async function handleSend(input: string): Promise<void> {
-    if (!input.trim() || streaming) return
+  async function handleSend(input: string, attachments: ChatAttachment[] = []): Promise<void> {
+    if ((!input.trim() && attachments.length === 0) || streaming) return
 
     const conv = conversations.find((c) => c.id === activeId)!
 
@@ -117,7 +117,8 @@ export default function Chat({ model, onSwitchModel }: Props) {
       id: newId('m'),
       role: 'user',
       content: input,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      attachments
     }
     const assistantMsg: ChatMessage = {
       id: newId('m'),
@@ -132,7 +133,8 @@ export default function Chat({ model, onSwitchModel }: Props) {
     updateActive((c) => {
       const title =
         c.messages.length === 0
-          ? input.slice(0, 48) + (input.length > 48 ? '…' : '')
+          ? (input || attachments[0]?.name || 'Document').slice(0, 48) +
+            ((input || attachments[0]?.name || '').length > 48 ? '…' : '')
           : c.title
       return { ...c, title, messages: [...c.messages, userMsg, assistantMsg] }
     })
@@ -140,7 +142,8 @@ export default function Chat({ model, onSwitchModel }: Props) {
     const history = [...conv.messages, userMsg].map((m) => ({
       role: m.role,
       content: m.content,
-      toolCalls: m.toolCalls
+      toolCalls: m.toolCalls,
+      attachments: m.attachments
     }))
 
     setStreaming(true)
@@ -220,7 +223,7 @@ export default function Chat({ model, onSwitchModel }: Props) {
       }
       return { ...c, messages: msgs.slice(0, -1) }
     })
-    setTimeout(() => handleSend(lastUser.content), 0)
+    setTimeout(() => handleSend(lastUser.content, lastUser.attachments), 0)
   }
 
   const canvasVisible =

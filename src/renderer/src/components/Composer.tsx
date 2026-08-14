@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { transcribeAudioBlob } from '../lib/whisper'
+import type { ChatAttachment } from '@shared/types'
 
 interface Props {
-  onSend: (text: string) => void
+  onSend: (text: string, attachments: ChatAttachment[]) => void
   onStop: () => void
   streaming: boolean
   disabled: boolean
@@ -25,7 +26,11 @@ export default function Composer({
   const [recordSeconds, setRecordSeconds] = useState(0)
   const [recordError, setRecordError] = useState<string | null>(null)
   const [modelProgress, setModelProgress] = useState<{ pct: number; label: string } | null>(null)
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [extractingFiles, setExtractingFiles] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
   const mediaRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const streamRef = useRef<MediaStream | null>(null)
@@ -41,9 +46,40 @@ export default function Composer({
 
   function submit(): void {
     const t = text.trim()
-    if (!t || streaming || disabled) return
-    onSend(t)
+    if ((!t && attachments.length === 0) || streaming || disabled || extractingFiles) return
+    onSend(t, attachments)
     setText('')
+    setAttachments([])
+    setAttachmentError(null)
+  }
+
+  async function onFilesSelected(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    if (!files.length) return
+    if (attachments.length + files.length > 6) {
+      setAttachmentError('You can attach up to 6 files per message.')
+      return
+    }
+    setExtractingFiles(true)
+    setAttachmentError(null)
+    try {
+      const extracted = await Promise.all(
+        files.map(async (file) =>
+          window.api.extractAttachment({
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            data: await file.arrayBuffer()
+          })
+        )
+      )
+      setAttachments((current) => [...current, ...extracted])
+    } catch (error) {
+      setAttachmentError((error as Error).message || 'Could not read that file.')
+    } finally {
+      setExtractingFiles(false)
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
@@ -135,12 +171,61 @@ export default function Composer({
     }
   }
 
-  const canSend = text.trim().length > 0 && !disabled && recState === 'idle'
+  const canSend =
+    (text.trim().length > 0 || attachments.length > 0) &&
+    !disabled &&
+    !extractingFiles &&
+    recState === 'idle'
 
   return (
     <div className="shrink-0 px-6 pb-6 pt-2">
       <div className="mx-auto max-w-3xl">
+        {(attachments.length > 0 || extractingFiles) && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {attachments.map((attachment, index) => (
+              <div
+                key={`${attachment.name}-${index}`}
+                className="flex max-w-[240px] items-center gap-2 rounded-lg border border-white/10 bg-white/[0.05] px-3 py-2 text-xs text-ink-100"
+              >
+                <span className="truncate">{attachment.name}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${attachment.name}`}
+                  onClick={() => setAttachments((items) => items.filter((_, i) => i !== index))}
+                  className="text-ink-400 hover:text-white"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {extractingFiles && (
+              <span className="rounded-lg border border-white/10 px-3 py-2 text-xs text-ink-400">
+                Reading document…
+              </span>
+            )}
+          </div>
+        )}
         <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-2 shadow-lg shadow-black/40 focus-within:border-white/20">
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            accept=".pdf,.xlsx,.ppt,.pptx,.doc,.docx,.csv"
+            onChange={onFilesSelected}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            disabled={streaming || disabled || extractingFiles}
+            aria-label="Attach document"
+            title="Attach PDF, Excel, PowerPoint, Word, or CSV"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-ink-400 transition hover:bg-white/5 hover:text-white disabled:opacity-40"
+          >
+            <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7">
+              <path d="M7 10.5l4.8-4.8a3 3 0 114.2 4.2l-6.2 6.2a5 5 0 01-7.1-7.1l6-6" strokeLinecap="round" />
+            </svg>
+          </button>
           <MicButton
             state={recState}
             seconds={recordSeconds}
@@ -188,7 +273,9 @@ export default function Composer({
           )}
         </div>
         <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-ink-400">
-          {recordError ? (
+          {attachmentError ? (
+            <span className="text-red-400/90">{attachmentError}</span>
+          ) : recordError ? (
             <span className="text-red-400/90">{recordError}</span>
           ) : recState === 'recording' ? (
             <span>Click mic again to stop.</span>
@@ -203,7 +290,7 @@ export default function Composer({
           ) : recState === 'transcribing' ? (
             <span className="shimmer-text">Transcribing locally…</span>
           ) : (
-            <span>Enter to send · Shift+Enter for newline · mic for voice</span>
+            <span>Attach PDF, Excel, PowerPoint, Word, or CSV · mic for voice</span>
           )}
         </div>
       </div>
@@ -280,4 +367,3 @@ function pickMime(): string | undefined {
   }
   return undefined
 }
-

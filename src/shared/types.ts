@@ -35,13 +35,34 @@ export interface ChatMessage {
   model?: string
   done?: boolean
   activity?: AgentActivity
+  attachments?: ChatAttachment[]
+}
+
+export interface AttachmentInput {
+  name: string
+  type: string
+  size: number
+  data: ArrayBuffer
+}
+
+export interface ChatAttachment {
+  name: string
+  type: string
+  size: number
+  content: string
+  truncated: boolean
 }
 
 export type AgentMode = 'chat' | 'code'
 
 export interface ChatRequest {
   conversationId: string
-  messages: Array<{ role: Role; content: string; toolCalls?: ToolCall[] }>
+  messages: Array<{
+    role: Role
+    content: string
+    toolCalls?: ToolCall[]
+    attachments?: ChatAttachment[]
+  }>
   model: string
   enableTools: boolean
   mode: AgentMode
@@ -121,4 +142,3 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
 ]
 
 export const DEFAULT_MODEL = 'mlx-community/gemma-4-e4b-it-4bit'
-
