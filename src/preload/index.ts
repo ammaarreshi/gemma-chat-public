@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
 import type {
   ChatRequest,
+  AttachmentInput,
+  ChatAttachment,
   SetupStatus,
   StreamChunk,
   WorkspaceInfo,
@@ -21,6 +23,9 @@ const api = {
   },
 
   listLocalModels: (): Promise<string[]> => ipcRenderer.invoke('models:list-local'),
+
+  extractAttachment: (input: AttachmentInput): Promise<ChatAttachment> =>
+    ipcRenderer.invoke('attachments:extract', input),
 
   sendChat: async (req: ChatRequest, onChunk: (c: StreamChunk) => void): Promise<void> => {
     const { channel } = (await ipcRenderer.invoke('chat:send', req)) as { channel: string }
