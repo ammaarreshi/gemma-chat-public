@@ -37,6 +37,7 @@ Everything happens locally. The model runs via [MLX-LM](https://github.com/ml-ex
 - 💬 **Chat Mode** — Conversational AI with tool use (web search, URL fetch, calculator, bash).
 - 🔄 **Model Switching** — Hot-swap between 4 Gemma variants on the fly.
 - 🎤 **Voice Input** — Local speech-to-text via in-browser Whisper.
+- 📎 **Document Context** — Attach PDF, Excel (`.xlsx`), PowerPoint (`.ppt`/`.pptx`), Word (`.doc`/`.docx`), and CSV files. Text extraction stays local.
 - ✈️ **Works Offline** — After the one-time model download, everything runs without internet.
 - 💾 **Zero Config** — Python venv + MLX runtime auto-provisions on first launch.
 
@@ -88,6 +89,7 @@ src/
 ├── main/              Electron main process
 │   ├── index.ts       Window + IPC + agent loop
 │   ├── mlx.ts         MLX-LM venv install / server lifecycle / chat streaming
+│   ├── attachments.ts Local PDF and Office document text extraction
 │   ├── workspace.ts   Per-conversation workspace + static file server
 │   └── tools.ts       Tool definitions + system prompts + XML action parser
 ├── preload/           contextBridge API surface
@@ -97,7 +99,7 @@ src/
 │   │   ├── Chat.tsx       Main layout + model switcher
 │   │   ├── Canvas.tsx     Preview / Code / Files tabs (Build mode)
 │   │   ├── Message.tsx    Chat bubbles + tool cards + activity bar
-│   │   ├── Composer.tsx   Input + mic button
+│   │   ├── Composer.tsx   Input + attachment + mic controls
 │   │   └── Sidebar.tsx    Conversation list
 │   └── lib/whisper.ts     Browser Whisper pipeline
 └── shared/types.ts    IPC types + model registry

@@ -7,7 +7,6 @@ import {
   installMLX,
   startServer,
   stopServer,
-  hasModel,
   chatStream,
   listLocalModels,
   type MLXChatMessage
@@ -33,6 +32,8 @@ import {
   wsWriteFile
 } from './workspace'
 import type { ChatRequest, StreamChunk, ToolCall } from '../shared/types'
+import type { AttachmentInput } from '../shared/types'
+import { extractAttachment, messageContentWithAttachments } from './attachments'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -169,7 +170,10 @@ async function handleChat(req: ChatRequest, channel: string): Promise<void> {
     }
 
     for (const m of req.messages) {
-      baseMessages.push({ role: m.role as MLXChatMessage['role'], content: m.content })
+      baseMessages.push({
+        role: m.role as MLXChatMessage['role'],
+        content: messageContentWithAttachments(m.content, m.attachments)
+      })
       if (m.toolCalls) {
         for (const tc of m.toolCalls) {
           if (tc.result != null) {
@@ -511,6 +515,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('models:list-local', async () => {
     return listLocalModels()
+  })
+
+  ipcMain.handle('attachments:extract', async (_e, input: AttachmentInput) => {
+    return extractAttachment(input)
   })
 
   ipcMain.handle('chat:send', async (_e, req: ChatRequest) => {
